@@ -29,17 +29,3 @@ Export Blender VSE timelines to EDL format for use in other video editors.
 - Supported: MOVIE, SOUND, IMAGE strips
 - Transitions: CROSS, GAMMA_CROSS
 
-## Limitations
-
-EDL format supports:
-- ✅ Cuts and dissolves
-- ✅ Markers (as comments)
-- ✅ Gaps
-- ❌ Effects (except dissolves)
-- ❌ Blend modes
-
-For effects/blend modes, use MLT XML or FCP7 XML (planned).
-
----
-
-**Version**: 0.9.0 | **License**: GPL v2+ | **Blender**: 4.0+

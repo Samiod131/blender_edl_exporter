@@ -30,10 +30,10 @@ from bpy.types import Operator, Panel, PropertyGroup
 bl_info = {
     "name": "Export EDL",
     "author": "Tintwotin, Campbell Barton, William R. Zwicky, batFINGER, szaszak, Samiod131",
-    "version": (0, 9, 0),
+    "version": (0, 1, 0),
     "blender": (4, 0, 0),
     "location": "Sequencer > Sidebar > EDL Export",
-    "description": "Export timeline to EDL with markers, gaps, dissolves, and metadata",
+    "description": "Export timeline to EDL with markers, gaps, dissolves, and metadata. Adapted from a script by Tintwotin.",
     "warning": "",
     "doc_url": "https://github.com/Samiod131/blender_edl_exporter",
     "category": "Import-Export",
