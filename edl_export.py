@@ -30,10 +30,10 @@ from bpy.types import Operator, Panel, PropertyGroup
 bl_info = {
     "name": "Export EDL",
     "author": "Tintwotin, Campbell Barton, William R. Zwicky, batFINGER, szaszak, Samiod131",
-    "version": (0, 8, 0),
+    "version": (0, 9, 0),
     "blender": (4, 0, 0),
     "location": "Sequencer > Sidebar > EDL Export",
-    "description": "Export timeline to EDL (CMX 3600, OpenShot, GVG, CMX 340)",
+    "description": "Export timeline to EDL with markers, gaps, dissolves, and metadata",
     "warning": "",
     "doc_url": "https://github.com/Samiod131/blender_edl_exporter",
     "category": "Import-Export",
@@ -166,8 +166,9 @@ class EDLBlock:
         recIn (TimeCode): Record in timecode.
         recOut (TimeCode): Record out timecode.
         file (str): Source filename.
+        comments (list): Additional comment lines for this event.
     """
-    __slots__ = ('id', 'reel', 'channels', 'transition', 'transDur', 'srcIn', 'srcOut', 'recIn', 'recOut', 'file')
+    __slots__ = ('id', 'reel', 'channels', 'transition', 'transDur', 'srcIn', 'srcOut', 'recIn', 'recOut', 'file', 'comments')
     
     def __init__(self):
         self.id = 0
@@ -180,6 +181,7 @@ class EDLBlock:
         self.recIn = None
         self.recOut = None
         self.file = ""
+        self.comments = []
 
 
 class EDLList(list):
@@ -189,12 +191,14 @@ class EDLList(list):
         title (str): EDL title.
         dropframe (bool): Whether to use drop frame timecode.
         format (str): Export format ('CMX3600', 'OPENSHOT', 'GVG', 'CMX340').
+        warnings (list): List of validation warnings.
     """
     def __init__(self):
         super().__init__()
         self.title = "Untitled"
         self.dropframe = False
         self.format = 'CMX3600'
+        self.warnings = []
 
     def save_edl(self):
         """Generate EDL formatted string based on selected format.
@@ -242,6 +246,12 @@ class EDLList(list):
                     lines.append(f"* FROM CLIP NAME: {block.file}")
                 elif self.format == 'CMX3600':
                     lines.append(f"* SOURCE FILE: {block.file}")
+            
+            # Add custom comments/metadata for this block
+            for comment in block.comments:
+                lines.append(comment)
+            
+            if block.file or block.comments:
                 lines.append("")
 
         return "\n".join(lines)
@@ -295,11 +305,96 @@ def count_clips_in_channel(scene, channel, strip_type):
                if s.channel == channel and s.type == strip_type)
 
 
+def get_markers_at_frame(scene, frame):
+    """Get all markers at a specific frame.
+    
+    Args:
+        scene: Blender scene object.
+        frame (int): Frame number.
+        
+    Returns:
+        list: List of marker names at this frame.
+    """
+    return [m.name for m in scene.timeline_markers if m.frame == frame]
+
+
+def sanitize_reel_name(name, format_type):
+    """Sanitize reel name according to EDL format constraints.
+    
+    Args:
+        name (str): Original reel name.
+        format_type (str): EDL format type.
+        
+    Returns:
+        str: Sanitized reel name.
+    """
+    # Remove illegal characters
+    name = ''.join(c for c in name if c.isalnum() or c in '_-')
+    
+    if format_type == 'CMX340':
+        # CMX 340: 3 numeric characters only
+        return name[:3].zfill(3) if name.isdigit() else "001"
+    elif format_type == 'GVG':
+        # GVG: max 6 characters
+        return name[:6] or "AX"
+    elif format_type == 'CMX3600':
+        # CMX 3600: max 8 characters
+        return name[:8] or "AX"
+    else:
+        return name[:8] or "AX"
+
+
+def detect_transition_type(strip):
+    """Detect if a strip has a dissolve/cross transition.
+    
+    Args:
+        strip: Blender sequence strip.
+        
+    Returns:
+        tuple: (transition_type, duration) - 'D' for dissolve, 'C' for cut, duration in frames.
+    """
+    # Check if strip is a cross/gamma_cross effect
+    if hasattr(strip, 'type') and strip.type in ('CROSS', 'GAMMA_CROSS'):
+        duration = strip.frame_final_duration
+        return ('D', duration)
+    
+    # Check blend mode for cross-fade like behavior
+    if hasattr(strip, 'blend_type') and strip.blend_type in ('ALPHA_OVER', 'CROSS'):
+        # If strip has significant opacity changes, might be a fade
+        if hasattr(strip, 'blend_alpha') and strip.blend_alpha < 1.0:
+            return ('D', 0)  # Indicate dissolve without specific duration
+    
+    return ('C', 0)  # Default to cut
+
+
+def get_strip_metadata(strip):
+    """Extract metadata from a strip for EDL comments."""
+    comments = []
+    
+    # Transform
+    if hasattr(strip, 'transform'):
+        t = strip.transform
+        if t.offset_x != 0 or t.offset_y != 0:
+            comments.append(f"* TRANSFORM: X={t.offset_x:.1f} Y={t.offset_y:.1f}")
+    
+    # Crop
+    if hasattr(strip, 'crop'):
+        c = strip.crop
+        if c.min_x > 0 or c.max_x > 0 or c.min_y > 0 or c.max_y > 0:
+            comments.append(f"* CROP: L={c.min_x} R={c.max_x} T={c.max_y} B={c.min_y}")
+    
+    # Opacity
+    if hasattr(strip, 'blend_alpha') and strip.blend_alpha < 1.0:
+        comments.append(f"* OPACITY: {strip.blend_alpha:.2f}")
+    
+    return comments
+
+
 # ============================================================
 # EXPORT FUNCTION
 # ============================================================
 
-def create_edl_block(strip, event_id, fps, channel_label, filepath):
+def create_edl_block(strip, event_id, fps, channel_label, filepath, scene=None, export_options=None):
     """Create an EDL block from a strip.
     
     Args:
@@ -308,6 +403,8 @@ def create_edl_block(strip, event_id, fps, channel_label, filepath):
         fps (int): Frames per second.
         channel_label (str): Channel designation (V, A1, A2, etc).
         filepath (str): Source file path.
+        scene: Blender scene (for markers).
+        export_options (dict): Export options dict with 'markers' and 'metadata' keys.
         
     Returns:
         EDLBlock: Configured EDL block.
@@ -315,45 +412,61 @@ def create_edl_block(strip, event_id, fps, channel_label, filepath):
     block = EDLBlock()
     block.id = event_id
     block.channels = channel_label
+    
+    # Detect transition type
+    trans_type, trans_dur = detect_transition_type(strip)
+    block.transition = trans_type
+    if trans_dur > 0:
+        block.transDur = f"{trans_dur:03d}"
+    
     block.srcIn = TimeCode(strip.frame_offset_start, fps)
     block.srcOut = TimeCode(strip.frame_offset_start + strip.frame_final_duration, fps)
     block.recIn = TimeCode(strip.frame_final_start, fps)
     block.recOut = TimeCode(strip.frame_final_end - 1, fps)
     block.file = bpy.path.basename(filepath)
+    
+    # Check export options
+    export_markers = True
+    export_metadata = True
+    if export_options:
+        export_markers = export_options.get('markers', True)
+        export_metadata = export_options.get('metadata', True)
+    
+    # Add markers at clip start
+    if scene and export_markers:
+        markers = get_markers_at_frame(scene, strip.frame_final_start)
+        for marker in markers:
+            block.comments.append(f"* MARKER: {marker}")
+    
+    # Add extended metadata
+    if export_metadata:
+        metadata = get_strip_metadata(strip)
+        block.comments.extend(metadata)
+    
     return block
 
 
 def create_gap_block(event_id, fps, start_frame, end_frame, channel_label):
-    """Create a black/gap EDL block.
-    
-    Args:
-        event_id (int): Event number.
-        fps (int): Frames per second.
-        start_frame (int): Gap start frame.
-        end_frame (int): Gap end frame.
-        channel_label (str): Channel designation.
-        
-    Returns:
-        EDLBlock: Configured gap block.
-    """
+    """Create a black/gap EDL block."""
     block = EDLBlock()
     block.id = event_id
     block.reel = "BL"
     block.channels = channel_label
     duration = end_frame - start_frame
-    block.srcIn = TimeCode(1, fps)
+    block.srcIn = TimeCode(0, fps)
     block.srcOut = TimeCode(duration, fps)
     block.recIn = TimeCode(start_frame, fps)
     block.recOut = TimeCode(end_frame - 1, fps)
+    block.comments.append("* GAP/BLACK")
     return block
 
 
-def write_edl(context, filepath, edl_format):
+def write_edl(context, output_filepath, edl_format):
     """Export Blender VSE timeline to EDL file.
     
     Args:
         context: Blender context.
-        filepath (str): Output EDL file path.
+        output_filepath (str): Output EDL file path.
         edl_format (str): EDL format ('CMX3600', 'OPENSHOT', 'GVG', 'CMX340').
         
     Returns:
@@ -363,15 +476,25 @@ def write_edl(context, filepath, edl_format):
     fps = get_fps()
 
     edl = EDLList()
-    edl.title = bpy.path.display_name_from_filepath(filepath)
+    edl.title = bpy.path.display_name_from_filepath(output_filepath)
     edl.format = edl_format
     
     strips = get_sorted_strips(scene)
     event_id = 1
     reel_counter = 1
+    
+    # Simple validation
+    if len(strips) > 999:
+        edl.warnings.append(f"Warning: {len(strips)} events exceeds CMX 3600 limit of 999")
+    
+    # Export options
+    export_options = {
+        'markers': scene.edl_export_markers,
+        'metadata': scene.edl_export_metadata
+    }
 
     if edl_format == 'OPENSHOT':
-        video_strips = [s for s in strips if s.channel == scene.edl_video_channel and s.type == 'MOVIE']
+        video_strips = [s for s in strips if s.channel == scene.edl_video_channel and s.type in ('MOVIE', 'IMAGE')]
         audio_channels = [track.channel for track in scene.edl_audio_tracks]
         audio_strips = [s for s in strips if s.channel in audio_channels and s.type == 'SOUND']
         
@@ -383,29 +506,37 @@ def write_edl(context, filepath, edl_format):
             if strip.frame_final_start > last_end:
                 gap_v = create_gap_block(event_id, fps, last_end, strip.frame_final_start, "V")
                 edl.append(gap_v)
+                event_id += 1
                 
-                for audio_strip in [s for s in audio_strips if s.frame_final_start == strip.frame_final_start]:
-                    gap_a = create_gap_block(event_id, fps, last_end, strip.frame_final_start, "A")
-                    edl.append(gap_a)
+                gap_a = create_gap_block(event_id, fps, last_end, strip.frame_final_start, "A")
+                edl.append(gap_a)
+                event_id += 1
             
             if strip.type == 'MOVIE':
-                block_v = create_edl_block(strip, event_id, fps, "V", strip.filepath)
+                block_v = create_edl_block(strip, event_id, fps, "V", strip.filepath, scene, export_options)
                 edl.append(block_v)
+                event_id += 1
                 
-                block_a = create_edl_block(strip, event_id, fps, "A", strip.filepath)
+                block_a = create_edl_block(strip, event_id, fps, "A", strip.filepath, scene, export_options)
                 edl.append(block_a)
-            elif strip.type == 'SOUND':
-                block = create_edl_block(strip, event_id, fps, "A", strip.sound.filepath)
+                event_id += 1
+            elif strip.type == 'IMAGE':
+                block = create_edl_block(strip, event_id, fps, "V", strip.directory + strip.elements[0].filename, scene, export_options)
                 edl.append(block)
+                event_id += 1
+            elif strip.type == 'SOUND':
+                block = create_edl_block(strip, event_id, fps, "A", strip.sound.filepath, scene, export_options)
+                edl.append(block)
+                event_id += 1
             
             last_end = max(last_end, strip.frame_final_end)
-            event_id += 1
     
     elif edl_format == 'CMX340':
         for strip in strips:
-            if strip.channel == scene.edl_video_channel and strip.type == 'MOVIE':
-                block = create_edl_block(strip, event_id, fps, "V", strip.filepath)
-                block.reel = f"{reel_counter:03d}"
+            if strip.channel == scene.edl_video_channel and strip.type in ('MOVIE', 'IMAGE'):
+                filepath = strip.filepath if strip.type == 'MOVIE' else strip.directory + strip.elements[0].filename
+                block = create_edl_block(strip, event_id, fps, "V", filepath, scene, export_options)
+                block.reel = sanitize_reel_name(f"{reel_counter:03d}", 'CMX340')
                 edl.append(block)
                 event_id += 1
                 reel_counter += 1
@@ -413,12 +544,15 @@ def write_edl(context, filepath, edl_format):
                     reel_counter = 1
 
         audio_channels = [track.channel for track in scene.edl_audio_tracks]
+        if len(audio_channels) > 2:
+            edl.warnings.append("Warning: CMX 340 only supports 2 audio tracks, additional tracks ignored")
+        
         for idx, ch in enumerate(audio_channels[:2]):
             for strip in strips:
                 if strip.channel == ch and strip.type == 'SOUND':
                     channel_label = f"A{idx + 1}"
-                    block = create_edl_block(strip, event_id, fps, channel_label, strip.sound.filepath)
-                    block.reel = f"{reel_counter:03d}"
+                    block = create_edl_block(strip, event_id, fps, channel_label, strip.sound.filepath, scene, export_options)
+                    block.reel = sanitize_reel_name(f"{reel_counter:03d}", 'CMX340')
                     edl.append(block)
                     event_id += 1
                     reel_counter += 1
@@ -427,9 +561,10 @@ def write_edl(context, filepath, edl_format):
     
     elif edl_format == 'GVG':
         for strip in strips:
-            if strip.channel == scene.edl_video_channel and strip.type == 'MOVIE':
-                block = create_edl_block(strip, event_id, fps, "V", strip.filepath)
-                block.reel = block.reel[:6]
+            if strip.channel == scene.edl_video_channel and strip.type in ('MOVIE', 'IMAGE'):
+                filepath = strip.filepath if strip.type == 'MOVIE' else strip.directory + strip.elements[0].filename
+                block = create_edl_block(strip, event_id, fps, "V", filepath, scene, export_options)
+                block.reel = sanitize_reel_name(block.reel, 'GVG')
                 edl.append(block)
                 event_id += 1
 
@@ -437,28 +572,62 @@ def write_edl(context, filepath, edl_format):
         for strip in strips:
             if strip.channel in audio_channels and strip.type == 'SOUND':
                 track_idx = audio_channels.index(strip.channel) + 1
-                block = create_edl_block(strip, event_id, fps, f"A{track_idx}", strip.sound.filepath)
-                block.reel = block.reel[:6]
+                block = create_edl_block(strip, event_id, fps, f"A{track_idx}", strip.sound.filepath, scene, export_options)
+                block.reel = sanitize_reel_name(block.reel, 'GVG')
                 edl.append(block)
                 event_id += 1
     
-    else:
-        for strip in strips:
-            if strip.channel == scene.edl_video_channel and strip.type == 'MOVIE':
-                block = create_edl_block(strip, event_id, fps, "V", strip.filepath)
-                edl.append(block)
+    else:  # CMX3600
+        # Handle video channel with gap detection
+        video_strips = [s for s in strips if s.channel == scene.edl_video_channel and s.type in ('MOVIE', 'IMAGE')]
+        last_end = scene.frame_start
+        
+        for strip in video_strips:
+            # Insert gap if needed
+            if strip.frame_final_start > last_end:
+                gap = create_gap_block(event_id, fps, last_end, strip.frame_final_start, "V")
+                edl.append(gap)
                 event_id += 1
+            
+                filepath = strip.filepath if strip.type == 'MOVIE' else strip.directory + strip.elements[0].filename
+            block = create_edl_block(strip, event_id, fps, "V", filepath, scene, export_options)
+            block.reel = sanitize_reel_name(block.reel, 'CMX3600')
+            edl.append(block)
+            event_id += 1
+            last_end = strip.frame_final_end
 
+        # Handle audio channels with gap detection
         audio_channels = [track.channel for track in scene.edl_audio_tracks]
-        for strip in strips:
-            if strip.channel in audio_channels and strip.type == 'SOUND':
-                track_idx = audio_channels.index(strip.channel) + 1
-                block = create_edl_block(strip, event_id, fps, f"A{track_idx}", strip.sound.filepath)
+        for track_idx, ch in enumerate(audio_channels, 1):
+            audio_strips = [s for s in strips if s.channel == ch and s.type == 'SOUND']
+            last_end = scene.frame_start
+            
+            for strip in audio_strips:
+                # Insert gap if needed
+                if strip.frame_final_start > last_end:
+                    gap = create_gap_block(event_id, fps, last_end, strip.frame_final_start, f"A{track_idx}")
+                    edl.append(gap)
+                    event_id += 1
+                
+                block = create_edl_block(strip, event_id, fps, f"A{track_idx}", strip.sound.filepath, scene, export_options)
+                block.reel = sanitize_reel_name(block.reel, 'CMX3600')
                 edl.append(block)
                 event_id += 1
-
-    with open(filepath, 'w', encoding='utf-8') as f:
+                last_end = strip.frame_final_end
+    
+    # Write EDL file (convert Blender relative path to absolute)
+    abs_output_path = bpy.path.abspath(output_filepath)
+    print(f"Writing EDL to: {abs_output_path}")
+    
+    with open(abs_output_path, 'w', encoding='utf-8') as f:
         f.write(edl.save_edl())
+    
+    print(f"EDL successfully written: {abs_output_path}")
+    
+    # Print warnings
+    if edl.warnings:
+        for warning in edl.warnings:
+            print(warning)
 
     return {'FINISHED'}
 
@@ -528,7 +697,18 @@ class SEQUENCER_OT_export_edl(Operator, ExportHelper):
     )
 
     def execute(self, context):
-        edl_format = context.scene.edl_format
+        scene = context.scene
+        edl_format = scene.edl_format
+        
+        # Pre-export validation
+        if not scene.sequence_editor:
+            self.report({'ERROR'}, "No sequence editor found")
+            return {'CANCELLED'}
+        
+        if not scene.sequence_editor.sequences_all:
+            self.report({'ERROR'}, "No strips in timeline")
+            return {'CANCELLED'}
+        
         result = write_edl(context, self.filepath, edl_format)
         
         if result == {'FINISHED'}:
@@ -542,12 +722,11 @@ class SEQUENCER_OT_export_edl(Operator, ExportHelper):
             filepath = self.filepath
             
             def show_popup(popup_self, popup_context):
-                popup_self.layout.label(text="EDL Export Successful!", icon='CHECKMARK')
-                popup_self.layout.separator()
-                popup_self.layout.label(text=f"Format: {format_names[edl_format]}")
-                popup_self.layout.label(text=f"File: {filepath}")
+                popup_self.layout.label(text=f"Exported: {format_names[edl_format]}")
+                popup_self.layout.label(text=f"{filepath}")
             
             context.window_manager.popup_menu(show_popup, title="Export Complete", icon='INFO')
+            self.report({'INFO'}, f"EDL exported successfully to {filepath}")
         
         return result
     
@@ -610,10 +789,24 @@ class SEQUENCER_PT_edl_export(Panel):
         box.label(text="Export Format:", icon='FILE_TEXT')
         box.prop(scene, "edl_format", text="")
         
+        # Show format-specific info with compatibility warnings
+        edl_format = scene.edl_format
+        audio_track_count = len(scene.edl_audio_tracks)
+        
+        if edl_format == 'CMX340' and audio_track_count > 2:
+            box.label(text="⚠ CMX 340: Only 2 audio tracks supported", icon='ERROR')
+        elif edl_format == 'CMX3600':
+            if audio_track_count > 4:
+                box.label(text="⚠ CMX 3600: Max 4 audio tracks", icon='ERROR')
+        
         layout.separator()
         fps = get_fps()
         box = layout.box()
         box.label(text=f"Project FPS: {fps}", icon='TIME')
+        
+        # Show marker count
+        if scene.timeline_markers:
+            box.label(text=f"Markers: {len(scene.timeline_markers)}", icon='MARKER_HLT')
         
         layout.separator()
         layout.operator("sequencer.export_edl", icon='EXPORT', text="Export EDL")
@@ -653,15 +846,26 @@ def register():
     )
     
     bpy.types.Scene.edl_format = EnumProperty(
-        name="EDL Format",
-        description="EDL format to export",
+        name="Format",
         items=[
-            ('CMX3600', "CMX 3600", "Industry standard (Premiere, Resolve, Media Composer)"),
-            ('OPENSHOT', "OpenShot", "OpenShot compatible with gaps and unified audio"),
-            ('GVG', "GVG (Grass Valley)", "Grass Valley format with 6-char reel names"),
-            ('CMX340', "CMX 340", "Legacy format with 3-char numeric reels (2 audio max)"),
+            ('CMX3600', "CMX 3600", "Premiere, Resolve, Media Composer"),
+            ('OPENSHOT', "OpenShot", "OpenShot, Kdenlive"),
+            ('GVG', "GVG", "Grass Valley"),
+            ('CMX340', "CMX 340", "Legacy (2 audio max)"),
         ],
         default='CMX3600',
+    )
+    
+    bpy.types.Scene.edl_export_metadata = bpy.props.BoolProperty(
+        name="Metadata",
+        description="Export metadata comments",
+        default=True
+    )
+    
+    bpy.types.Scene.edl_export_markers = bpy.props.BoolProperty(
+        name="Markers",
+        description="Export timeline markers",
+        default=True
     )
     
     def init_defaults():
@@ -682,6 +886,8 @@ def unregister():
     del bpy.types.Scene.edl_video_channel
     del bpy.types.Scene.edl_audio_tracks
     del bpy.types.Scene.edl_format
+    del bpy.types.Scene.edl_export_metadata
+    del bpy.types.Scene.edl_export_markers
 
 
 if __name__ == "__main__":

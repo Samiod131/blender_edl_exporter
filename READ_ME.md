@@ -1,50 +1,45 @@
 # Blender EDL Exporter
 
-Export Blender VSE timelines to EDL (Edit Decision List) format for use in other video editors.
+Export Blender VSE timelines to EDL format for use in other video editors.
 
-## What It Does
+## Features
 
-- Exports video + audio tracks to EDL files
-- Supports 4 formats: CMX 3600, OpenShot, GVG, CMX 340
-- Dynamic audio track configuration
-- Auto-generates format-specific filenames
-
-## Installation
-
-1. Copy `edl_export.py` to Blender addons folder
-2. Enable in: Edit → Preferences → Add-ons → "Export EDL"
+- Exports video + audio tracks
+- 4 formats: CMX 3600, OpenShot, GVG, CMX 340
+- Markers, gaps, dissolves, metadata
+- Image sequence support
 
 ## Usage
 
-**In VSE Sidebar (N key) → EDL Panel:**
-
-1. Set video channel (default: 1)
-2. Add/remove audio tracks with channels
-3. Select export format (CMX 3600/OpenShot/GVG/CMX 340)
-4. Click "Export EDL"
+1. Open VSE sidebar (N key) → EDL tab
+2. Set video channel
+3. Add audio tracks
+4. Select format (CMX 3600 recommended)
+5. Click "Export EDL"
 
 **Formats:**
-- **CMX 3600**: Premiere, Resolve, Media Composer, Final Cut
-- **OpenShot**: OpenShot, Kdenlive (with gaps)
-- **GVG**: Grass Valley (6-char reel names)
-- **CMX 340**: Legacy (3-char reels, 2 audio max)
+- **CMX 3600**: Premiere, Resolve, Media Composer
+- **OpenShot**: OpenShot, Kdenlive
+- **GVG**: Grass Valley
+- **CMX 340**: Legacy (2 audio max)
 
 ## Requirements
 
 - Blender 4.0+
-- Any FPS (rounded to integer for timecode)
-- Strips: MOVIE (video), SOUND (audio)
+- Supported: MOVIE, SOUND, IMAGE strips
+- Transitions: CROSS, GAMMA_CROSS
 
 ## Limitations
 
-- No effects/transitions (EDL format limitation)
-- No meta strips
-- Basic cuts only
+EDL format supports:
+- ✅ Cuts and dissolves
+- ✅ Markers (as comments)
+- ✅ Gaps
+- ❌ Effects (except dissolves)
+- ❌ Blend modes
 
-## Roadmap
-
-See `FORMATS.md` for planned formats (MLT XML, FCP XML).
+For effects/blend modes, use MLT XML or FCP7 XML (planned).
 
 ---
 
-*Work in progress. Contributions welcome.*
+**Version**: 0.9.0 | **License**: GPL v2+ | **Blender**: 4.0+
