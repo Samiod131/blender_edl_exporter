@@ -29,12 +29,12 @@ from bpy.types import Operator, Panel, PropertyGroup
 
 bl_info = {
     "name": "Import EDL",
-    "author": "Tintwotin, Campbell Barton, William R. Zwicky, batFINGER, szaszak, Samiod131",
-    "version": (1, 1, 0),
+    "author": "Samiod131",
+    "version": (0, 1, 0),
     "blender": (4, 0, 0),
     "location": "Sequencer > Sidebar > EDL Import",
     "description": "Import CMX 3600 EDL files with multi-track audio, dissolves, and markers",
-    "warning": "",
+    "warning": "Not a stable release.",
     "doc_url": "https://github.com/Samiod131/blender_edl_exporter",
     "category": "Import-Export",
 }

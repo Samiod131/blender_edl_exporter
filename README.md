@@ -49,5 +49,12 @@ A lot of import features remain untested with edge cases. This mainly a personna
 - Supported: MOVIE, SOUND, IMAGE strips
 - Transitions: CROSS, GAMMA_CROSS
 
+## Issues to fix
 
+- Problem with channel alignment at import
+- Untested in and out loops for non CMX 3600
+- Untested with industry editors
+- Workflow and usefulness of multi audio track is uncertain, maybe keeping it at one channel would be best. 
+
+With that being fixed/tested, this can be a decent basic edl import/export tool. Next refacto after these would be modularity and unification of the two addons in a more manageable file structure. Next feature should be xml standards inclusion.
 
